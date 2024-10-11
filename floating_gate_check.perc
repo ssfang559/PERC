@@ -1,0 +1,120 @@
+#!tvf
+
+# Source any process-specific files if they exist
+#source "/apps/imctf/runset/calibre/${::env(PERC_PROCESS)}/data/${::env(PERC_VERSION)}/common/PERC_repository/common/header.tvf"
+
+tvf::VERBATIM {
+VARIABLE PERC_SCHCELLNAME ENVIRONMENT
+SOURCE PATH $PERC_SCHNETLIST
+SOURCE PRIMARY PERC_SCHCELLNAME
+SOURCE SYSTEM SPICE
+
+PERC NETLIST SOURCE
+PERC REPORT "perc.rep"
+PERC REPORT PLACEMENT LIST MAXIMUM ALL
+MASK SVDB DIRECTORY "svdb" QUERY
+
+PERC PROPERTY R R
+
+// Custom modification to black-box the Antifuse block in A-die
+// LVS BOX SOURCE MDIE_AFARRAY_R03
+
+LVS FILTER v_ac SOURCE SHORT
+LVS FILTER switch_close SOURCE SHORT
+//LVS FILTER switch_open SOURCE OPEN
+
+// PERC LOAD floating_gate_check_tvf INIT floating_gate_check_init SELECT check_floating_gate check_turned_off_mos
+// PERC LOAD floating_gate_check_tvf XFORM REDUCTION INIT floating_gate_check_init SELECT check_always_off_pmos check_always_off_nmos
+//PERC LOAD floating_gate_check_tvf INIT floating_gate_check_init SELECT check_always_off_pmos check_always_off_nmos
+PERC LOAD floating_gate_check_tvf INIT floating_gate_check_init SELECT check_switch_open_gate 
+TVF FUNCTION floating_gate_check_tvf [/*
+    package require CalibreLVS_PERC
+
+    # Load all required inhouse packages
+    lappend auto_path "/apps/cad/modules/tcl_packages"
+    package require common_utils
+    package require perc_utils
+
+    # Initialisation procedure
+    proc floating_gate_check_init {} {
+        # Define the threshold voltage and resistance values
+        global vth rth mosdiode_vth
+        set vth 0.05
+        set rth 1000000
+        set mosdiode_vth 0.6
+        # Define supply netTypes
+        perc::define_net_type Power {lvsPower VDD?}
+        perc::define_net_type Ground {lvsGround VSS?}
+        perc::define_type_set Supply {Power || Ground}
+        # Define netTypes related to transistors, resistors, and capacitors
+        perc::define_net_type_by_device MOSGate -type {MP MN} -pin {g} -cell
+        perc::define_net_type_by_device MOSSrcDrn -type {MP MN} -pin {s d} -cell
+        perc::define_net_type_by_device ResPosNeg -type {R} -property "R < $rth" -pin {p n} -cell
+        perc::define_net_type_by_device ResToSrcDrn -type {R} -property "R < $rth" -pin {p n} -pinNetType {{p n} {MOSSrcDrn}} -cell
+        perc::define_net_type_by_device CapToRes -type {C} -pin {p n} -pinNetType {{p n} {ResPosNeg}} -cell
+        #perc::define_net_type_by_device PMOSDiodeDrn -type {MP} -pin {g d} -pinNetType {{s} {Power}} -condition cond_check_gate_drain_short -conditionNetType [list] -cell
+        #perc::define_net_type_by_device NMOSDiodeDrn -type {MN} -pin {g d} -pinNetType {{s} {Ground}} -condition cond_check_gate_drain_short -conditionNetType [list] -cell
+        
+        #perc::define_net_type_by_device SwitchOpenToGate -type {switch_open} -pin {POS NEG} -pinNetType {{POS NEG} {MOSGate} } -cell
+        perc::define_net_type_by_device SwitchOpenPosNeg -type {switch_open} -pin {POS NEG} -cell
+        perc::define_net_type_by_device MOSGateToSwitchOpen -type {MP MN} -pin {g} -pinNetType {{g} {SwitchOpenPosNeg}} -cell
+
+
+        #perc::define_type_set MOSDiodeDrn {PMOSDiodeDrn || NMOSDiodeDrn}
+        # Use a 0.05V voltage interval as it seems to be the smallest voltage "precision" given by the input voltages
+        perc::define_voltage_interval -interval 0.05
+#        ::perc_utils::read_voltage_file $::env(PERC_VOLTAGEFILE) -voltageMode multi -defNetTypes true -defTypeSet UserNetType
+        puts "[::perc_utils::read_voltage_file $::env(PERC_VOLTAGEFILE) -voltageMode multi -defNetTypes true -defTypeSet UserNetType]"
+
+        # Create voltage path propagation through resistors (below a threshold resistance) and handle potential multiple voltages on the same net
+        perc::create_voltage_path -type {R} -pin {p n} -property "R < $rth" -break {Supply || UserNetType}
+        # Create voltage path propagation through MOS and handle potential multiple voltages on the same net
+        #perc::create_voltage_path -type {MP} -pin {s d} -pinLimit pmos_set_limits -pinVoltage pmos_propagate_voltage
+        #perc::create_voltage_path -type {MN} -pin {s d} -pinLimit nmos_set_limits -pinVoltage nmos_propagate_voltage
+#        perc::create_voltage_path -type {MP} -pin {s d} -pinVoltage pmos_propagate_voltage
+#        perc::create_voltage_path -type {MN} -pin {s d} -pinVoltage nmos_propagate_voltage
+
+        perc::create_voltage_path -type {MP} -pin {s d}
+        perc::create_voltage_path -type {MN} -pin {s d}
+
+        # Create voltage path propagation through known primitive subcircuits
+        perc::create_voltage_path -type {v_ac} -pin {POS NEG}
+        perc::create_voltage_path -type {switch_close} -pin {POS NEG}
+        # Create corresponding net paths for debugging and tracing
+        perc::create_net_path -type {R} -pin {p n} -property "R < $rth" -break {Supply || UserNetType}
+        perc::create_net_path -type {v_ac} -pin {POS NEG}
+        perc::create_net_path -type {switchR_CBRCNT_10G3_R0FP1_close} -pin {POS NEG}
+        perc::create_net_path -type {MP MN} -pin {s d}
+        # Include any process-specific initialisation commands
+        #set process_path "/apps/imctf/runset/calibre/${::env(PERC_PROCESS)}/data/${::env(PERC_VERSION)}/common/PERC_repository/Floating_Gate_Check"
+        #set initfile "${process_path}/initialisation.tvf"
+        #if {[file exists $initfile]} {
+        #    source $initfile
+        #}
+    }
+
+    proc check_switch_open_gate {} {
+        perc::check_device -type {MP MN} -condition check_switch_open_cond -comment "Highlight gate connected to switch_open"
+    }
+
+    #Find all mos that gate have no voltage and gate has been connected to switch open.
+    proc check_switch_open_cond {dev} {
+        set gateVoltages [perc::voltage [perc::get_pins $dev -name {g}] -path]
+        puts "DEBUG:gateVoltages"
+        puts "$gateVoltages"
+        set gatenet [perc::get_nets $dev -name {g}]
+        puts "-----11111111---------"
+        puts "[perc::name $gatenet]"
+        set retval 0
+        if {[llength $gateVoltages] == 0} {
+            if {[perc::is_net_of_net_type $gatenet {MOSGateToSwitchOpen}]} {
+                set retval 1
+            }
+        }
+        return $retval
+    }
+
+    
+
+*/]
+}
