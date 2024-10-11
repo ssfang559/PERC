@@ -1,0 +1,229 @@
+#!tvf
+
+# Source any process-specific files if they exist
+#source "/apps/imctf/runset/calibre/${::env(PERC_PROCESS)}/data/${::env(PERC_VERSION)}/common/PERC_repository/common/header.tvf"
+
+tvf::VERBATIM {
+VARIABLE PERC_SCHCELLNAME ENVIRONMENT
+SOURCE PATH $PERC_SCHNETLIST
+SOURCE PRIMARY PERC_SCHCELLNAME
+SOURCE SYSTEM SPICE
+
+PERC NETLIST SOURCE
+PERC REPORT "perc.rep"
+PERC REPORT PLACEMENT LIST MAXIMUM ALL
+MASK SVDB DIRECTORY "svdb" QUERY
+
+LVS POWER NAME "VPLT!" "VANTI!" "VFSRDB!" "VFSGT!" "VLS!" "VDLL!" "V1P8!" "VDDQ!" "VDLY!" "VPPEX!" "VISO!" "VEQ!" "VARY!" "VBLPE!" "VBLPO!" "VDD!" "VPP!" 
+LVS GROUND NAME "VSSDLL!" "VSSQ!" "VBB!" "VKK!" "VSS! VSS"
+
+PERC PROPERTY R R
+
+PERC LOAD voltage_domain_crossing_check_tvf XFORM REDUCTION INIT voltage_propagation SELECT mos_vg_vs_voltage_check
+
+TVF FUNCTION voltage_domain_crossing_check_tvf [/*
+    package require CalibreLVS_PERC
+
+    # Load all required inhouse packages
+    lappend auto_path "/apps/cad/modules/tcl_packages"
+    package require common_utils
+    package require perc_utils
+
+    # Initialisation procedure
+    proc voltage_propagation {} {
+        # Define the resistance threshold value
+        set rth 1000000
+        # Define supply netTypes
+        perc::define_net_type Power {lvsPower}
+        perc::define_net_type Ground {lvsGround}
+        perc::define_type_set Supply {Power || Ground}
+        # Define global variables for Power and Ground nets
+        global powernets groundnets
+        set powernets [linsert [perc::expand_list "lvsPower"] end "Power"]
+        set groundnets [linsert [perc::expand_list "lvsGround"] end "Ground"]
+        puts "$powernets"
+        puts "$groundnets"
+        # Define all initial voltages and IO netTypes
+        ::perc_utils::read_voltage_file $::env(PERC_VOLTAGEFILE) -voltageMode multi -defTypeSet UserNetType
+        # Define a netType to indicate traversal through MOS source/drain pins
+        perc::define_net_type_by_device MOSSDnet -type {MP} -pinNetType {{s} {!Supply}} -pin {s} -cell
+        perc::define_net_type_by_device MOSSDnet -type {MP} -pinNetType {{d} {!Supply}} -pin {d}
+        # Create net and voltage path propagation through resistors (below a threshold resistance)
+        perc::create_voltage_path -type {R} -pin {p n} -property "R < $rth" -break {Supply || UserNetType}
+        perc::create_net_path -type {R} -pin {p n} -property "R < $rth" -break {Supply || UserNetType}
+        # Create net and voltage path propagation through MOS
+        perc::create_voltage_path -type {MP} -pin {s d}
+        perc::create_net_path -type {MP} -pin {s d}
+        # Create net and voltage path propagation through known primitive subcircuits
+        perc::create_voltage_path -type {switch_close} -pin {POS NEG}
+        perc::create_net_path -type {switch_close} -pin {POS NEG}
+        # Include any process-specific initialisation commands
+#        set process_path "/apps/imctf/runset/calibre/${::env(PERC_PROCESS)}/data/${::env(PERC_VERSION)}/common/PERC_repository/Voltage_Domain_Crossing_Check"
+#        set initfile "${process_path}/initialisation.tvf"
+#        if {[file exists $initfile]} {
+            source /home/dbbackup/proj/drpoa/ssfang/REVBP_1205/V1P/database/initialisation.tvf
+puts "\[INFO\] Level shifters: $level_shifters"
+#        }
+    }
+
+    #############################
+    ### Rule check procedures ###
+    #############################
+    proc mos_vg_vs_voltage_check {} {
+        perc::check_device -type {MP} -condition mos_vg_vs_voltage_check_cond -comment "The Vg of PMOS cannot less than Vs."
+    }
+
+    ##############################
+    ### Conditional procedures ###
+    ##############################
+    # This proc performs detailed checks to detect failure conditions
+
+    proc mos_vg_vs_voltage_check_cond { dev } {
+      global level_shifters
+
+      if { ! [ ::perc_utils::check_dev_in_cell_list $dev $level_shifters ] } {
+
+        set gateNet [ perc::get_nets $dev -name {g} ]
+        set drainNet [ perc::get_nets $dev -name {d} ]
+        set sourceNet [ perc::get_nets $dev -name {s} ]
+
+        set gateVoltages [ lsort -real [ perc::voltage $gateNet -numeric -path ] ]
+        set gateMinVoltage [ lindex $gateVoltages 0 ]
+        set gateMaxVoltage [ lindex $gateVoltages end ]
+
+        set drainVoltages [ lsort -real [ perc::voltage $drainNet -numeric -path ] ]
+        set drainMinVoltage [ lindex $drainVoltages 0 ]
+        set drainMaxVoltage [ lindex $drainVoltages end ]
+
+        set sourceVoltages [ lsort -real [ perc::voltage $sourceNet -numeric -path ] ]
+        set sourceMinVoltage [ lindex $sourceVoltages 0 ]
+        set sourceMaxVoltage [ lindex $sourceVoltages end ]
+
+        set vpp [ perc::voltage_value "VPP!" -numeric ]
+        #set vanti [ expr max( [ perc::voltage_value "VANTI_L!" -numeric ], [ perc::voltage_value "VANTI_R!" -numeric ] ) ]
+
+        if { $gateMaxVoltage == "" } {
+          set gateMaxVoltage 0
+        } ;# if
+        if { $gateMinVoltage == "" } {
+          set gateMinVoltage 0
+        } ;# if
+        if { $drainMaxVoltage == "" } {
+          set drainMaxVoltage 0
+        } ;# if
+        if { $drainMinVoltage == "" } {
+          set drainMinVoltage 0
+        } ;# if
+        if { $sourceMaxVoltage == "" } {
+          set sourceMaxVoltage 0
+        } ;# if
+        if { $sourceMinVoltage == "" } {
+          set sourceMinVoltage 0
+        } ;# if
+
+        puts "         gate   max voltage: $gateMaxVoltage"
+        puts "         gate   min voltage: $gateMinVoltage"
+        puts "         drain  max voltage: $drainMaxVoltage"
+        puts "         drain  min voltage: $drainMinVoltage"
+        puts "         source max voltage: $sourceMaxVoltage"
+        puts "         source min voltage: $sourceMinVoltage"
+        puts "         VPP! voltage: $vpp"
+        #puts "         VANTI! voltage: $vanti"
+
+        #foreach gateVoltage $gateVoltages {
+        #  foreach sourceVoltage $sourceVoltages {
+        #    foreach drainVoltage $drainVoltages {
+        #      set source_gate_diff_voltage [ expr $sourceVoltage - $gateVoltage ]
+        #      if { $source_gate_diff_voltage < 0 } {
+        #        perc::report_base_result -title "The Vg < Vs" -value " source voltage: ${sourceVoltage}v, gate voltage: ${gateVoltage}v, drain voltage: {$drainVoltage}v "
+        #        return 1
+        #      } ;# if
+        #    } ;# foreach 
+        #  } ;# foreach
+        #} ;# foreach
+        if { [ perc::type $dev ] eq "MP" } {
+
+          if { [ expr abs( $gateMaxVoltage ) ] > 0 && [ expr abs($sourceMaxVoltage) - abs($gateMaxVoltage) ] > 0 } {
+
+            perc::report_base_result -title "The |Vs_max| - |Vg_max| > 0!" -value "Gate max voltage: $gateMaxVoltage, source max voltage: $sourceMaxVoltage"
+
+            return 1
+
+          } ;# if
+#          elseif { [ expr $sourceMinVoltage - $gateMaxVoltage ] > 0 } {
+#
+#            perc::report_base_result -title "The Vg_max - Vs_min > 0!" -value "Gate max voltage: $gateMaxVoltage, source min voltage: $sourceMinVoltage"
+#
+#            return 1
+#
+#          } ;# elseif
+
+#          } ;# if
+
+        } ;# if
+
+
+      return 0
+
+    } ;# proc mos_vg_vs_voltage_check_cond
+
+    proc cond_check_voltage_domain_crossing {dev} {
+        global level_shifters powernets groundnets
+        set retval 0
+        set gatenet [perc::get_nets $dev -name {g}]
+        set srcnet [perc::get_nets $dev -name {s}]
+        set drnnet [perc::get_nets $dev -name {d}]
+        puts "[perc::name $dev] $dev"
+        puts "  g: [perc::name $gatenet] \[[perc::type $gatenet]\]"
+        puts "  s: [perc::name $srcnet] \[[perc::type $srcnet]\]"
+        puts "  d: [perc::name $drnnet] \[[perc::type $drnnet]\]"
+        puts "  gate tie to pg: [perc::is_net_of_net_type $gatenet {Supply}]"
+        puts "  src tie to pg: [perc::is_net_of_net_type $srcnet {Supply}]"
+        puts "  drn tie to pg: [perc::is_net_of_net_type $drnnet {Supply}]"
+        puts "  gate tie to sd: [perc::is_net_of_path_type $gatenet {MOSSDnet}]"
+
+        # Waive any errors if the gate does not have a propagation path to a transistor (meaning it is connected to a port directly or through only resistors)
+        # Also skip the check if the gate or both source/drain pins are directly connected to supply nets
+        if { ! [perc::is_net_of_net_type $gatenet {Supply}] && ([perc::is_net_of_net_type $srcnet {Supply}] || [perc::is_net_of_net_type $drnnet {Supply}]) && [perc::is_net_of_path_type $gatenet {MOSSDnet}] && [::perc_utils::check_dev_in_cell_list $dev $level_shifters] == 0} {
+
+            # Perform voltage comparisons
+            set gatevolt [lsort -real [perc::voltage $gatenet -numeric -path]]
+            set gate_min [lindex $gatevolt 0]
+            set gate_max [lindex $gatevolt end]
+            set srcvolt [perc::voltage $srcnet -numeric -path]
+            set drnvolt [perc::voltage $drnnet -numeric -path]
+            set srcdrnvolt [lsort -real [concat $srcvolt $drnvolt]]
+            set srcdrn_min [lindex $srcdrnvolt 0]
+            set srcdrn_max [lindex $srcdrnvolt end]
+            puts "  gate max: $gate_max"
+            puts "  gate min: $gate_min"
+            puts "   s/d max: $srcdrn_max"
+            puts "   s/d min: $srcdrn_min"
+#            if {$srcdrnvolt eq ""} {
+#              puts "gatenet: $gatenet [perc::name $gatenet -fromTop] [perc::type  $gatenet -path]"
+#              puts "srcnet=$srcnet [perc::name $srcnet -fromTop] [perc::type $srcnet -path]"
+#              puts "drnnet=$drnnet [perc::name $drnnet -fromTop] [perc::type $drnnet -path]"
+#            }
+            if {$srcdrnvolt ne "" && $gate_max != 0} {
+            # These checks are hardcoded according to the specs given by designers according to the current project, but should be changed in the future to be read in from input files in order to be portable across projects and processes
+            if {$gate_max < $srcdrn_max} {
+                perc::report_base_result -title "The gate side domain maximum voltage is less than the source/drain side domain maximum voltage" -value "Gate domain max voltage: $gate_max and source/drain domain max voltage: $srcdrn_max"
+                set retval 1
+            } elseif {$gate_max > 0 && $srcdrn_min > 0 && $gate_max - $srcdrn_min >= 1.8 && [ regexp {^ntn} [perc::subtype $dev] ]} {
+                perc::report_base_result -title "The thin nmos gate maximum positive voltage is greater than its source/drain maximum positive voltage by >= 1.8V" -value "Gate max voltage: $gate_max and source/drain min voltage: $srcdrn_min"
+                set retval 1
+            } elseif {$gate_max > 0 && $srcdrn_max > 0 && $gate_max - $srcdrn_max >= 0.3 && [ regexp {^ptn} [perc::subtype $dev] ]} {
+                perc::report_base_result -title "The thin pmos gate maximum positive voltage is greater than its source/drain maximum positive voltage by >= 0.3V" -value "Gate max voltage: $gate_max and source/drain max voltage: $srcdrn_max"
+                set retval 1
+            } elseif {($gate_min < 0 || $srcdrn_min < 0) && abs($gate_min - $srcdrn_min) >= 0.2 && [ regexp {^[np]tn} [perc::subtype $dev] ]} {
+                perc::report_base_result -title "The thin mos gate minimum negative voltage and its source/drain minimum negative voltage differ by >= 0.2V" -value "Gate min voltage: $gate_min and source/drain min voltage: $srcdrn_min"
+                set retval 1
+            }
+        }
+        }
+        return $retval
+    }
+*/]
+
+}
+
